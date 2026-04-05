@@ -5,7 +5,18 @@ import unittest
 from pathlib import Path
 
 from task_app.data.database import Database
-from task_app.models import ROLE_ADMIN, ROLE_USER, STATUS_COMPLETED
+from task_app.models import (
+    PERMISSION_ASSIGN_TASKS,
+    PERMISSION_CREATE_TASKS,
+    PERMISSION_DELETE_ALL_TASKS,
+    PERMISSION_EXPORT_DATA,
+    PERMISSION_EDIT_ALL_TASKS,
+    PERMISSION_MANAGE_ROLES,
+    PERMISSION_MANAGE_USERS,
+    PERMISSION_UPDATE_ALL_TASK_STATUS,
+    PERMISSION_VIEW_ALL_TASKS,
+    STATUS_COMPLETED,
+)
 from task_app.services.auth import AuthService
 from task_app.services.import_export import ImportExportService
 from task_app.services.tasks import TaskService
@@ -22,8 +33,24 @@ class TaskAppServiceTests(unittest.TestCase):
         self.db.initialize()
         self.auth = AuthService(self.db)
         self.users = UserService(self.db)
-        self.users.create_user("alice", "Alice", "pw1", ROLE_USER)
-        self.users.create_user("bob", "Bob", "pw2", ROLE_USER)
+        roles = {role.name: role for role in self.users.list_roles()}
+        self.staff_role = roles["Staff"]
+        self.manager_role = self.users.create_role(
+            "Manager",
+            "Task manager role",
+            [
+                PERMISSION_VIEW_ALL_TASKS,
+                PERMISSION_CREATE_TASKS,
+                PERMISSION_EDIT_ALL_TASKS,
+                PERMISSION_DELETE_ALL_TASKS,
+                PERMISSION_ASSIGN_TASKS,
+                PERMISSION_UPDATE_ALL_TASK_STATUS,
+                PERMISSION_EXPORT_DATA,
+            ],
+        )
+        self.users.create_user("alice", "Alice", "pw1", self.staff_role.id)
+        self.users.create_user("bob", "Bob", "pw2", self.staff_role.id)
+        self.users.create_user("maria", "Maria", "pw3", self.manager_role.id)
         self.task_service = TaskService(self.db, root / "attachments")
         self.task_service.attachments_dir.mkdir(parents=True, exist_ok=True)
         self.import_export = ImportExportService(self.db, self.task_service, self.users, root / "exports")
@@ -31,6 +58,7 @@ class TaskAppServiceTests(unittest.TestCase):
         self.admin = self.auth.login("admin", "admin123")
         self.alice = self.auth.login("alice", "pw1")
         self.bob = self.auth.login("bob", "pw2")
+        self.maria = self.auth.login("maria", "pw3")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -64,7 +92,22 @@ class TaskAppServiceTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.task_service.delete_task(self.alice, task_id)
 
-    def test_admin_can_reassign_and_complete(self) -> None:
+    def test_admin_can_delete_assigned_task(self) -> None:
+        task_id = self.task_service.create_task(
+            self.admin,
+            "Assigned task",
+            "Description",
+            "medium",
+            None,
+            "",
+            self.bob.id,
+            [],
+        )
+        self.task_service.delete_task(self.admin, task_id)
+        with self.assertRaises(ValueError):
+            self.task_service.get_task(self.admin, task_id)
+
+    def test_manager_can_reassign_and_complete(self) -> None:
         task_id = self.task_service.create_task(
             self.alice,
             "Finish report",
@@ -76,7 +119,7 @@ class TaskAppServiceTests(unittest.TestCase):
             [],
         )
         self.task_service.update_task(
-            self.admin,
+            self.maria,
             task_id,
             "Finish report",
             "Description",
@@ -87,8 +130,8 @@ class TaskAppServiceTests(unittest.TestCase):
             self.bob.id,
             [],
         )
-        self.task_service.change_status(self.admin, task_id, STATUS_COMPLETED)
-        task = self.task_service.get_task(self.admin, task_id)
+        self.task_service.change_status(self.maria, task_id, STATUS_COMPLETED)
+        task = self.task_service.get_task(self.maria, task_id)
         self.assertEqual(task.assigned_user_id, self.bob.id)
         self.assertEqual(task.status, STATUS_COMPLETED)
 
@@ -128,7 +171,7 @@ class TaskAppServiceTests(unittest.TestCase):
             None,
             [],
         )
-        export_path = self.import_export.export_csv(self.alice)
+        export_path = self.import_export.export_csv(self.maria)
         self.assertTrue(Path(export_path).exists())
 
     def test_user_can_update_profile_and_password(self) -> None:
@@ -136,6 +179,19 @@ class TaskAppServiceTests(unittest.TestCase):
         self.assertEqual(updated.username, "alice2")
         self.assertEqual(updated.display_name, "Alice Smith")
         self.assertIsNotNone(self.auth.login("alice2", "newpass"))
+
+    def test_custom_role_is_persisted_with_permissions(self) -> None:
+        role = self.users.create_role(
+            "Ops Lead",
+            "Can manage users and roles.",
+            [PERMISSION_MANAGE_USERS, PERMISSION_MANAGE_ROLES],
+        )
+        self.users.create_user("ops", "Ops", "pw4", role.id)
+        ops = self.auth.login("ops", "pw4")
+        self.assertIsNotNone(ops)
+        assert ops is not None
+        self.assertEqual(ops.role, "Ops Lead")
+        self.assertTrue(ops.has_permission(PERMISSION_MANAGE_USERS))
 
     def test_passwords_are_stored_with_pbkdf2(self) -> None:
         with self.db.connect() as conn:

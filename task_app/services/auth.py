@@ -12,9 +12,23 @@ class AuthService:
         with self.db.connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, username, display_name, role, active, created_at, password_hash, public_key_pem, encrypted_private_key
-                FROM users
+                SELECT
+                    u.id,
+                    u.username,
+                    u.display_name,
+                    u.role_id,
+                    r.name AS role_name,
+                    u.active,
+                    u.created_at,
+                    u.password_hash,
+                    u.public_key_pem,
+                    u.encrypted_private_key,
+                    GROUP_CONCAT(rp.permission) AS permissions
+                FROM users u
+                JOIN roles r ON r.id = u.role_id
+                LEFT JOIN role_permissions rp ON rp.role_id = r.id
                 WHERE username = ?
+                GROUP BY u.id
                 """,
                 (username.strip(),),
             ).fetchone()
@@ -42,9 +56,11 @@ class AuthService:
             id=row["id"],
             username=row["username"],
             display_name=row["display_name"],
-            role=row["role"],
+            role_id=row["role_id"],
+            role=row["role_name"],
             active=bool(row["active"]),
             created_at=row["created_at"],
             public_key_pem=public_key_pem,
+            permissions=frozenset(filter(None, (row["permissions"] or "").split(","))),
             session_private_key=private_key,
         )

@@ -10,7 +10,24 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from task_app.data.database import Database, utc_now
-from task_app.models import PRIORITIES, STATUS_COMPLETED, TASK_STATUSES, Attachment, Task, TaskHistoryEntry, User
+from task_app.models import (
+    PERMISSION_ASSIGN_TASKS,
+    PERMISSION_CREATE_TASKS,
+    PERMISSION_DELETE_ALL_TASKS,
+    PERMISSION_DELETE_OWN_TASKS,
+    PERMISSION_EDIT_ALL_TASKS,
+    PERMISSION_EDIT_OWN_TASKS,
+    PERMISSION_UPDATE_ALL_TASK_STATUS,
+    PERMISSION_UPDATE_OWN_TASK_STATUS,
+    PERMISSION_VIEW_ALL_TASKS,
+    PRIORITIES,
+    STATUS_COMPLETED,
+    TASK_STATUSES,
+    Attachment,
+    Task,
+    TaskHistoryEntry,
+    User,
+)
 
 
 class PermissionError(Exception):
@@ -35,7 +52,7 @@ class TaskService:
         self._migrate_legacy_tasks()
         clauses = []
         params: list[object] = []
-        if not current_user.is_admin and not include_all:
+        if (not current_user.has_permission(PERMISSION_VIEW_ALL_TASKS)) or not include_all:
             clauses.append("(t.creator_user_id = ? OR t.assigned_user_id = ?)")
             params.extend([current_user.id, current_user.id])
         if status:
@@ -195,8 +212,10 @@ class TaskService:
             raise ValueError("Invalid priority.")
         if not title.strip():
             raise ValueError("Title is required.")
-        if assigned_user_id and not current_user.is_admin:
-            raise PermissionError("Only admin can assign a task during creation.")
+        if not current_user.has_permission(PERMISSION_CREATE_TASKS):
+            raise PermissionError("You do not have permission to create tasks.")
+        if assigned_user_id and not current_user.has_permission(PERMISSION_ASSIGN_TASKS):
+            raise PermissionError("You do not have permission to assign a task during creation.")
         task_key = Fernet.generate_key()
         created_ts = created_at or utc_now()
         updated_ts = updated_at or created_ts
@@ -205,9 +224,9 @@ class TaskService:
                 """
                 INSERT INTO tasks (
                     title, description, priority, status, deadline, more_info,
-                    creator_user_id, assigned_user_id, created_at, updated_at
+                    creator_user_id, assigned_user_id, created_at, updated_at, master_task_key
                 )
-                VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._encrypt_field(task_key, title.strip()),
@@ -219,6 +238,7 @@ class TaskService:
                     assigned_user_id,
                     created_ts,
                     updated_ts,
+                    self.db.security.encrypt_text(task_key.decode("ascii")),
                 ),
             )
             task_id = int(cursor.lastrowid)
@@ -247,8 +267,8 @@ class TaskService:
         task = self.get_task(current_user, task_id)
         if not self.can_edit(current_user, task):
             raise PermissionError("You cannot edit this task.")
-        if assigned_user_id != task.assigned_user_id and not current_user.is_admin:
-            raise PermissionError("Only admin can assign or reassign tasks.")
+        if assigned_user_id != task.assigned_user_id and not current_user.has_permission(PERMISSION_ASSIGN_TASKS):
+            raise PermissionError("You do not have permission to assign or reassign tasks.")
         task_key = self._get_task_key(task_id, current_user)
         with self.db.connect() as conn:
             conn.execute(
@@ -301,20 +321,28 @@ class TaskService:
                 path.unlink()
 
     def can_edit(self, current_user: User, task: Task) -> bool:
-        return current_user.is_admin or task.creator_user_id == current_user.id
+        if current_user.has_permission(PERMISSION_EDIT_ALL_TASKS):
+            return True
+        return current_user.has_permission(PERMISSION_EDIT_OWN_TASKS) and task.creator_user_id == current_user.id
 
     def can_delete(self, current_user: User, task: Task) -> bool:
-        if current_user.is_admin:
+        if current_user.has_permission(PERMISSION_DELETE_ALL_TASKS):
             return True
-        return task.creator_user_id == current_user.id and task.assigned_user_id is None
+        return (
+            current_user.has_permission(PERMISSION_DELETE_OWN_TASKS)
+            and task.creator_user_id == current_user.id
+            and task.assigned_user_id is None
+        )
 
     def can_change_status(self, current_user: User, task: Task) -> bool:
-        if current_user.is_admin:
+        if current_user.has_permission(PERMISSION_UPDATE_ALL_TASK_STATUS):
             return True
+        if not current_user.has_permission(PERMISSION_UPDATE_OWN_TASK_STATUS):
+            return False
         return current_user.id in {task.creator_user_id, task.assigned_user_id}
 
     def stats_for(self, current_user: User) -> dict[str, int]:
-        tasks = self.list_tasks(current_user, include_all=False)
+        tasks = self.list_tasks(current_user, include_all=current_user.has_permission(PERMISSION_VIEW_ALL_TASKS))
         overdue = sum(1 for task in tasks if task.is_overdue)
         due_today = sum(1 for task in tasks if task.deadline_dt and task.deadline_dt.date() == datetime.now().date())
         completed = sum(1 for task in tasks if task.status == STATUS_COMPLETED)
@@ -336,9 +364,9 @@ class TaskService:
                 """
                 INSERT INTO tasks (
                     title, description, priority, status, deadline, more_info,
-                    creator_user_id, assigned_user_id, created_at, updated_at
+                    creator_user_id, assigned_user_id, created_at, updated_at, master_task_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._encrypt_field(task_key, str(task_data["title"])),
@@ -351,6 +379,7 @@ class TaskService:
                     assigned_user_id,
                     str(task_data["created_at"]),
                     str(task_data["updated_at"]),
+                    self.db.security.encrypt_text(task_key.decode("ascii")),
                 ),
             )
             task_id = int(cursor.lastrowid)
@@ -446,18 +475,48 @@ class TaskService:
                 "SELECT encrypted_task_key FROM task_access WHERE task_id = ? AND user_id = ?",
                 (task_id, current_user.id),
             ).fetchone()
+            if not row and current_user.has_permission(PERMISSION_VIEW_ALL_TASKS):
+                master_row = conn.execute("SELECT master_task_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if master_row and master_row["master_task_key"]:
+                    task_key = self.db.security.decrypt_text(master_row["master_task_key"]).encode("ascii")
+                    public_key_row = conn.execute("SELECT public_key_pem FROM users WHERE id = ?", (current_user.id,)).fetchone()
+                    if public_key_row and public_key_row["public_key_pem"]:
+                        encrypted_task_key = self.db.security.encrypt_task_key_for_user(task_key, public_key_row["public_key_pem"])
+                        conn.execute(
+                            """
+                            INSERT INTO task_access (task_id, user_id, encrypted_task_key)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(task_id, user_id) DO UPDATE SET encrypted_task_key = excluded.encrypted_task_key
+                            """,
+                            (task_id, current_user.id, encrypted_task_key),
+                        )
+                        row = {"encrypted_task_key": encrypted_task_key}
         if not row:
             raise PermissionError("You do not have access to decrypt this task.")
-        return self.db.security.decrypt_task_key_for_user(row["encrypted_task_key"], current_user.session_private_key)
+        task_key = self.db.security.decrypt_task_key_for_user(row["encrypted_task_key"], current_user.session_private_key)
+        with self.db.connect() as conn:
+            master_row = conn.execute("SELECT master_task_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if master_row and not master_row["master_task_key"]:
+                conn.execute(
+                    "UPDATE tasks SET master_task_key = ? WHERE id = ?",
+                    (self.db.security.encrypt_text(task_key.decode("ascii")), task_id),
+                    )
+        return task_key
 
     def _grant_access(self, conn, task_id: int, task_key: bytes, creator_user_id: int, assigned_user_id: int | None) -> None:
         user_rows = conn.execute(
             """
-            SELECT id, public_key_pem, role, active
-            FROM users
-            WHERE active = 1 AND (id = ? OR id = ? OR role = 'admin')
+            SELECT DISTINCT u.id, u.public_key_pem
+            FROM users u
+            LEFT JOIN role_permissions rp ON rp.role_id = u.role_id
+            WHERE u.active = 1
+              AND (
+                u.id = ?
+                OR u.id = ?
+                OR rp.permission = ?
+              )
             """,
-            (creator_user_id, assigned_user_id),
+            (creator_user_id, assigned_user_id, PERMISSION_VIEW_ALL_TASKS),
         ).fetchall()
         for user in user_rows:
             if not user["public_key_pem"]:
@@ -502,7 +561,7 @@ class TaskService:
                 conn.execute(
                     """
                     UPDATE tasks
-                    SET title = ?, description = ?, deadline = ?, more_info = ?
+                    SET title = ?, description = ?, deadline = ?, more_info = ?, master_task_key = ?
                     WHERE id = ?
                     """,
                     (
@@ -510,6 +569,7 @@ class TaskService:
                         self._encrypt_field(task_key, self.db.security.decrypt_text(row["description"]) or ""),
                         self._encrypt_field(task_key, self.db.security.decrypt_text(row["deadline"])) if row["deadline"] else None,
                         self._encrypt_field(task_key, self.db.security.decrypt_text(row["more_info"]) or ""),
+                        self.db.security.encrypt_text(task_key.decode("ascii")),
                         row["id"],
                     ),
                 )

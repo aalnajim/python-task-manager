@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from task_app.data.database import Database, utc_now
-from task_app.models import Attachment, Task, User
+from task_app.models import Attachment, PERMISSION_EXPORT_DATA, PERMISSION_IMPORT_DATA, PERMISSION_VIEW_ALL_TASKS, Task, User
 from task_app.services.tasks import TaskService
 from task_app.services.users import UserService
 
@@ -21,7 +21,9 @@ class ImportExportService:
         self.exports_dir = exports_dir
 
     def export_json_bundle(self, current_user: User, destination_zip: str | None = None) -> str:
-        tasks = self.task_service.list_tasks(current_user, include_all=current_user.is_admin)
+        if not current_user.has_permission(PERMISSION_EXPORT_DATA):
+            raise PermissionError("You do not have permission to export data.")
+        tasks = self.task_service.list_tasks(current_user, include_all=current_user.has_permission(PERMISSION_VIEW_ALL_TASKS))
         users = self.user_service.list_users()
         timestamp = utc_now().replace(":", "-")
         bundle_dir = self.exports_dir / f"bundle_{timestamp}"
@@ -71,7 +73,9 @@ class ImportExportService:
         return str(zip_path)
 
     def export_csv(self, current_user: User, destination_csv: str | None = None) -> str:
-        tasks = self.task_service.list_tasks(current_user, include_all=current_user.is_admin)
+        if not current_user.has_permission(PERMISSION_EXPORT_DATA):
+            raise PermissionError("You do not have permission to export data.")
+        tasks = self.task_service.list_tasks(current_user, include_all=current_user.has_permission(PERMISSION_VIEW_ALL_TASKS))
         timestamp = utc_now().replace(":", "-")
         csv_path = Path(destination_csv) if destination_csv else self.exports_dir / f"task_export_{timestamp}.csv"
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -116,6 +120,8 @@ class ImportExportService:
         return str(csv_path)
 
     def import_json_bundle(self, current_user: User, zip_path: str, merge: bool = True) -> dict[str, int]:
+        if not current_user.has_permission(PERMISSION_IMPORT_DATA):
+            raise PermissionError("You do not have permission to import data.")
         temp_dir = self.exports_dir / f"import_{utc_now().replace(':', '-')}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as archive:
@@ -124,7 +130,7 @@ class ImportExportService:
         users_by_username = {user.username: user for user in self.user_service.list_users()}
         imported = 0
         skipped = 0
-        existing_tasks = self.task_service.list_tasks(current_user, include_all=True)
+        existing_tasks = self.task_service.list_tasks(current_user, include_all=current_user.has_permission(PERMISSION_VIEW_ALL_TASKS))
         for task_payload in data.get("tasks", []):
             task_data = task_payload["task"]
             duplicate = next(

@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,7 +36,29 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QUrl
 
-from task_app.models import PRIORITIES, ROLE_ADMIN, STATUS_NEW, TASK_STATUSES, Task, User
+from task_app.models import (
+    ALL_PERMISSIONS,
+    PERMISSION_ASSIGN_TASKS,
+    PERMISSION_CREATE_TASKS,
+    PERMISSION_DELETE_ALL_TASKS,
+    PERMISSION_DELETE_OWN_TASKS,
+    PERMISSION_EDIT_ALL_TASKS,
+    PERMISSION_EDIT_OWN_TASKS,
+    PERMISSION_EXPORT_DATA,
+    PERMISSION_IMPORT_DATA,
+    PERMISSION_LABELS,
+    PERMISSION_MANAGE_ROLES,
+    PERMISSION_MANAGE_USERS,
+    PERMISSION_UPDATE_ALL_TASK_STATUS,
+    PERMISSION_UPDATE_OWN_TASK_STATUS,
+    PERMISSION_VIEW_ALL_TASKS,
+    PRIORITIES,
+    STATUS_NEW,
+    TASK_STATUSES,
+    Role,
+    Task,
+    User,
+)
 from task_app.services.auth import AuthService
 from task_app.services.import_export import ImportExportService
 from task_app.services.tasks import PermissionError, TaskService
@@ -141,21 +163,28 @@ def normalize_multiline(text: str) -> str:
 
 
 class LoginDialog(QDialog):
-    def __init__(self, auth_service: AuthService):
+    def __init__(self, auth_service: AuthService, remembered_username: str = "", remember_me: bool = False):
         super().__init__()
         self.auth_service = auth_service
         self.user: User | None = None
         self.setWindowTitle("Task App Login")
         layout = QFormLayout(self)
-        self.username = QLineEdit("admin")
-        self.password = QLineEdit("admin123")
+        self.username = QLineEdit(remembered_username)
+        self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.remember_me = QCheckBox("Remember me")
+        self.remember_me.setChecked(remember_me)
         layout.addRow("Username", self.username)
         layout.addRow("Password", self.password)
+        layout.addRow("", self.remember_me)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.handle_login)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+        if remembered_username:
+            self.password.setFocus()
+        else:
+            self.username.setFocus()
 
     def handle_login(self) -> None:
         user = self.auth_service.login(self.username.text(), self.password.text())
@@ -167,7 +196,7 @@ class LoginDialog(QDialog):
 
 
 class UserDialog(QDialog):
-    def __init__(self):
+    def __init__(self, roles: list[Role]):
         super().__init__()
         self.setWindowTitle("Create User")
         layout = QFormLayout(self)
@@ -176,7 +205,8 @@ class UserDialog(QDialog):
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.role = QComboBox()
-        self.role.addItems(["user", "admin"])
+        for role in roles:
+            self.role.addItem(role.name, role.id)
         configure_combo_box(self.role)
         layout.addRow("Username", self.username)
         layout.addRow("Display name", self.display_name)
@@ -186,6 +216,43 @@ class UserDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+
+class RoleDialog(QDialog):
+    def __init__(self, role: Role | None = None):
+        super().__init__()
+        self.setWindowTitle("Edit Role" if role else "Create Role")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name = QLineEdit(role.name if role else "")
+        self.description = QPlainTextEdit(role.description if role else "")
+        self.description.setMaximumHeight(80)
+        form.addRow("Role name", self.name)
+        form.addRow("Description", self.description)
+        layout.addLayout(form)
+
+        permission_box = QGroupBox("Permissions")
+        permission_layout = QVBoxLayout(permission_box)
+        self.permission_checks: dict[str, QCheckBox] = {}
+        selected = set(role.permissions if role else [])
+        for permission in ALL_PERMISSIONS:
+            checkbox = QCheckBox(PERMISSION_LABELS[permission])
+            checkbox.setChecked(permission in selected)
+            self.permission_checks[permission] = checkbox
+            permission_layout.addWidget(checkbox)
+        layout.addWidget(permission_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[str, str, list[str]]:
+        return (
+            self.name.text(),
+            normalize_multiline(self.description.toPlainText()),
+            [permission for permission, checkbox in self.permission_checks.items() if checkbox.isChecked()],
+        )
 
 
 class AccountSettingsDialog(QDialog):
@@ -280,7 +347,7 @@ class TaskDialog(QDialog):
             index = self.assignee_input.findData(task.assigned_user_id)
             if index >= 0:
                 self.assignee_input.setCurrentIndex(index)
-        if not current_user.is_admin:
+        if not current_user.has_permission(PERMISSION_ASSIGN_TASKS):
             self.assignee_input.setEnabled(False)
         if not task:
             self.status_input.setEnabled(False)
@@ -354,9 +421,18 @@ class TaskDetailsDialog(QDialog):
         apply_text_direction(title_label, task.title)
         summary_layout.addRow("Title", title_label)
         summary_layout.addRow("Description", self._read_only_text(task.description or "-"))
-        summary_layout.addRow("Priority", QLabel(task.priority))
-        summary_layout.addRow("Status", QLabel(task.status))
-        summary_layout.addRow("Deadline", QLabel(task.deadline or "No deadline"))
+        priority_bg, priority_fg = priority_colors(task.priority)
+        status_bg, status_fg = status_colors(task)
+        deadline_bg, deadline_fg = deadline_colors(task)
+        summary_layout.addRow("Priority", self._pill_label(task.priority, priority_bg, priority_fg))
+        summary_layout.addRow("Status", self._pill_label(task.status, status_bg, status_fg))
+        if task.deadline:
+            summary_layout.addRow(
+                "Deadline",
+                self._pill_label(task.deadline, deadline_bg or "#eef2f7", deadline_fg or "#607080"),
+            )
+        else:
+            summary_layout.addRow("Deadline", QLabel("No deadline"))
         summary_layout.addRow("Owner", QLabel(task.creator_name))
         summary_layout.addRow("Assignee", QLabel(task.assigned_name or "Unassigned"))
         summary_layout.addRow("More info", self._read_only_text(task.more_info or "-"))
@@ -412,6 +488,21 @@ class TaskDetailsDialog(QDialog):
         apply_editor_text_direction(widget, text)
         return widget
 
+    def _pill_label(self, text: str, bg: str, fg: str) -> QLabel:
+        widget = QLabel(text)
+        widget.setStyleSheet(
+            f"""
+            QLabel {{
+                background: {bg};
+                color: {fg};
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-weight: 600;
+            }}
+            """
+        )
+        return widget
+
     def remove_selected_attachment(self) -> None:
         item = self.attachment_list.currentItem()
         if item is None:
@@ -441,41 +532,68 @@ class AdminPanelDialog(QDialog):
         self.current_user = current_user
         self.setWindowTitle("Admin Panel")
         self.resize(800, 500)
-        layout = QHBoxLayout(self)
+        layout = QGridLayout(self)
 
         user_box = QGroupBox("Users")
         user_layout = QVBoxLayout(user_box)
-        self.user_table = QTableWidget(0, 4)
-        self.user_table.setHorizontalHeaderLabels(["ID", "Username", "Name", "Role/Status"])
+        self.user_table = QTableWidget(0, 5)
+        self.user_table.setHorizontalHeaderLabels(["ID", "Username", "Name", "Role", "Status"])
         user_layout.addWidget(self.user_table)
-        buttons_row = QHBoxLayout()
+        user_buttons = QHBoxLayout()
         add_user = QPushButton("Add User")
+        change_role = QPushButton("Change Role")
         toggle_user = QPushButton("Toggle Active")
         add_user.clicked.connect(self.create_user)
+        change_role.clicked.connect(self.change_selected_user_role)
         toggle_user.clicked.connect(self.toggle_selected_user)
-        buttons_row.addWidget(add_user)
-        buttons_row.addWidget(toggle_user)
-        user_layout.addLayout(buttons_row)
+        user_buttons.addWidget(add_user)
+        user_buttons.addWidget(change_role)
+        user_buttons.addWidget(toggle_user)
+        user_layout.addLayout(user_buttons)
 
-        task_box = QGroupBox("All Tasks")
+        role_box = QGroupBox("Roles")
+        role_layout = QVBoxLayout(role_box)
+        self.role_table = QTableWidget(0, 4)
+        self.role_table.setHorizontalHeaderLabels(["ID", "Name", "Permissions", "Type"])
+        role_layout.addWidget(self.role_table)
+        role_buttons = QHBoxLayout()
+        add_role = QPushButton("Add Role")
+        edit_role = QPushButton("Edit Role")
+        add_role.clicked.connect(self.create_role)
+        edit_role.clicked.connect(self.edit_selected_role)
+        role_buttons.addWidget(add_role)
+        role_buttons.addWidget(edit_role)
+        role_layout.addLayout(role_buttons)
+
+        task_box = QGroupBox("Visible Tasks")
         task_layout = QVBoxLayout(task_box)
         self.task_table = QTableWidget(0, 5)
         self.task_table.setHorizontalHeaderLabels(["ID", "Title", "Priority", "Status", "Assignee"])
         task_layout.addWidget(self.task_table)
 
-        layout.addWidget(user_box)
-        layout.addWidget(task_box)
+        layout.addWidget(user_box, 0, 0)
+        layout.addWidget(role_box, 0, 1)
+        layout.addWidget(task_box, 1, 0, 1, 2)
         self.refresh()
 
     def refresh(self) -> None:
+        roles = self.user_service.list_roles()
+        self.role_table.setRowCount(len(roles))
+        for row, role in enumerate(roles):
+            self.role_table.setItem(row, 0, QTableWidgetItem(str(role.id)))
+            self.role_table.setItem(row, 1, QTableWidgetItem(role.name))
+            self.role_table.setItem(row, 2, QTableWidgetItem(", ".join(PERMISSION_LABELS.get(item, item) for item in role.permissions)))
+            self.role_table.setItem(row, 3, QTableWidgetItem("System" if role.is_system else "Custom"))
+
         users = self.user_service.list_users()
         self.user_table.setRowCount(len(users))
         for row, user in enumerate(users):
             self.user_table.setItem(row, 0, QTableWidgetItem(str(user.id)))
             self.user_table.setItem(row, 1, QTableWidgetItem(user.username))
             self.user_table.setItem(row, 2, QTableWidgetItem(user.display_name))
-            self.user_table.setItem(row, 3, QTableWidgetItem(f"{user.role} / {'active' if user.active else 'inactive'}"))
-        tasks = self.task_service.list_tasks(self.current_user, include_all=True)
+            self.user_table.setItem(row, 3, QTableWidgetItem(user.role))
+            self.user_table.setItem(row, 4, QTableWidgetItem("active" if user.active else "inactive"))
+        tasks = self.task_service.list_tasks(self.current_user, include_all=self.current_user.has_permission(PERMISSION_VIEW_ALL_TASKS))
         self.task_table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
             self.task_table.setItem(row, 0, QTableWidgetItem(str(task.id)))
@@ -485,31 +603,102 @@ class AdminPanelDialog(QDialog):
             self.task_table.setItem(row, 4, QTableWidgetItem(task.assigned_name or "Unassigned"))
 
     def create_user(self) -> None:
-        dialog = UserDialog()
+        if not self.current_user.has_permission(PERMISSION_MANAGE_USERS):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to create users.")
+            return
+        roles = self.user_service.list_roles()
+        dialog = UserDialog(roles)
         if dialog.exec():
             try:
                 self.user_service.create_user(
                     dialog.username.text(),
                     dialog.display_name.text(),
                     dialog.password.text(),
-                    dialog.role.currentText(),
+                    int(dialog.role.currentData()),
                 )
                 self.refresh()
             except Exception as exc:
                 QMessageBox.warning(self, "Could not create user", str(exc))
 
-    def toggle_selected_user(self) -> None:
+    def create_role(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_MANAGE_ROLES):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to create roles.")
+            return
+        dialog = RoleDialog()
+        if not dialog.exec():
+            return
+        try:
+            self.user_service.create_role(*dialog.values())
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not create role", str(exc))
+
+    def edit_selected_role(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_MANAGE_ROLES):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to edit roles.")
+            return
+        row = self.role_table.currentRow()
+        if row < 0:
+            return
+        role_id = int(self.role_table.item(row, 0).text())
+        role = self.user_service.get_role(role_id)
+        dialog = RoleDialog(role)
+        if not dialog.exec():
+            return
+        try:
+            self.user_service.update_role(role_id, *dialog.values())
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not update role", str(exc))
+
+    def change_selected_user_role(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_MANAGE_USERS):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to change user roles.")
+            return
         row = self.user_table.currentRow()
         if row < 0:
             return
         user_id = int(self.user_table.item(row, 0).text())
-        role_status = self.user_table.item(row, 3).text()
-        active = "inactive" in role_status
+        roles = self.user_service.list_roles()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Change User Role")
+        layout = QFormLayout(dialog)
+        role_input = QComboBox()
+        current_role = self.user_table.item(row, 3).text()
+        for role in roles:
+            role_input.addItem(role.name, role.id)
+            if role.name == current_role:
+                role_input.setCurrentIndex(role_input.count() - 1)
+        configure_combo_box(role_input)
+        layout.addRow("Role", role_input)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if not dialog.exec():
+            return
+        try:
+            self.user_service.update_user_role(user_id, int(role_input.currentData()))
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not change role", str(exc))
+
+    def toggle_selected_user(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_MANAGE_USERS):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to manage users.")
+            return
+        row = self.user_table.currentRow()
+        if row < 0:
+            return
+        user_id = int(self.user_table.item(row, 0).text())
+        active = self.user_table.item(row, 4).text() == "inactive"
         self.user_service.set_user_active(user_id, active)
         self.refresh()
 
 
 class MainWindow(QMainWindow):
+    logout_requested = Signal()
+
     def __init__(
         self,
         current_user: User,
@@ -660,17 +849,24 @@ class MainWindow(QMainWindow):
         export_json_button = QPushButton("Export JSON")
         export_csv_button = QPushButton("Export CSV")
         import_button = QPushButton("Import JSON")
-        action_row.addWidget(create_button)
+        if self.current_user.has_permission(PERMISSION_CREATE_TASKS):
+            action_row.addWidget(create_button)
         action_row.addWidget(details_button)
-        action_row.addWidget(assign_button)
-        action_row.addWidget(edit_button)
-        action_row.addWidget(delete_button)
-        action_row.addWidget(status_button)
-        action_row.addWidget(done_button)
+        if self.current_user.has_permission(PERMISSION_ASSIGN_TASKS):
+            action_row.addWidget(assign_button)
+        if self.current_user.has_permission(PERMISSION_EDIT_OWN_TASKS) or self.current_user.has_permission(PERMISSION_EDIT_ALL_TASKS):
+            action_row.addWidget(edit_button)
+        if self.current_user.has_permission(PERMISSION_DELETE_OWN_TASKS) or self.current_user.has_permission(PERMISSION_DELETE_ALL_TASKS):
+            action_row.addWidget(delete_button)
+        if self.current_user.has_permission(PERMISSION_UPDATE_OWN_TASK_STATUS) or self.current_user.has_permission(PERMISSION_UPDATE_ALL_TASK_STATUS):
+            action_row.addWidget(status_button)
+            action_row.addWidget(done_button)
         action_row.addWidget(history_button)
-        action_row.addWidget(export_json_button)
-        action_row.addWidget(export_csv_button)
-        action_row.addWidget(import_button)
+        if self.current_user.has_permission(PERMISSION_EXPORT_DATA):
+            action_row.addWidget(export_json_button)
+            action_row.addWidget(export_csv_button)
+        if self.current_user.has_permission(PERMISSION_IMPORT_DATA):
+            action_row.addWidget(import_button)
         layout.addLayout(action_row)
 
         create_button.clicked.connect(self.create_task)
@@ -697,14 +893,20 @@ class MainWindow(QMainWindow):
         export_csv.triggered.connect(self.export_csv)
         import_json = QAction("Import JSON Bundle", self)
         import_json.triggered.connect(self.import_json)
-        file_menu.addAction(export_json)
-        file_menu.addAction(export_csv)
-        file_menu.addAction(import_json)
+        if self.current_user.has_permission(PERMISSION_EXPORT_DATA):
+            file_menu.addAction(export_json)
+            file_menu.addAction(export_csv)
+        if self.current_user.has_permission(PERMISSION_IMPORT_DATA):
+            file_menu.addAction(import_json)
         account_menu = menu.addMenu("Account")
         account_settings = QAction("Profile & Password", self)
         account_settings.triggered.connect(self.open_account_settings)
+        logout_action = QAction("Log Out", self)
+        logout_action.triggered.connect(self.request_logout)
         account_menu.addAction(account_settings)
-        if self.current_user.role == ROLE_ADMIN:
+        account_menu.addSeparator()
+        account_menu.addAction(logout_action)
+        if self.current_user.has_permission(PERMISSION_MANAGE_USERS) or self.current_user.has_permission(PERMISSION_MANAGE_ROLES):
             admin_menu = menu.addMenu("Admin")
             admin_panel = QAction("Open Admin Panel", self)
             admin_panel.triggered.connect(self.open_admin_panel)
@@ -722,7 +924,7 @@ class MainWindow(QMainWindow):
             query=self.search_input.text(),
             status=self.status_filter.currentData(),
             priority=self.priority_filter.currentData(),
-            include_all=False,
+            include_all=self.current_user.has_permission(PERMISSION_VIEW_ALL_TASKS),
         )
         self.table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
@@ -778,6 +980,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def create_task(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_CREATE_TASKS):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to create tasks.")
+            return
         dialog = TaskDialog(self.user_service, self.current_user)
         if dialog.exec():
             try:
@@ -800,8 +1005,8 @@ class MainWindow(QMainWindow):
         task_id = self.selected_task_id()
         if task_id is None:
             return
-        if not self.current_user.is_admin:
-            QMessageBox.warning(self, "Restricted", "Only admin can assign or reassign tasks.")
+        if not self.current_user.has_permission(PERMISSION_ASSIGN_TASKS):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to assign tasks.")
             return
         task = self.task_service.get_task(self.current_user, task_id)
         dialog = AssignTaskDialog(self.user_service, task)
@@ -825,6 +1030,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Assignment failed", str(exc))
 
     def edit_task(self) -> None:
+        if not (
+            self.current_user.has_permission(PERMISSION_EDIT_OWN_TASKS)
+            or self.current_user.has_permission(PERMISSION_EDIT_ALL_TASKS)
+        ):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to edit tasks.")
+            return
         task_id = self.selected_task_id()
         if task_id is None:
             return
@@ -838,6 +1049,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Task not updated", str(exc))
 
     def delete_task(self) -> None:
+        if not (
+            self.current_user.has_permission(PERMISSION_DELETE_OWN_TASKS)
+            or self.current_user.has_permission(PERMISSION_DELETE_ALL_TASKS)
+        ):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to delete tasks.")
+            return
         task_id = self.selected_task_id()
         if task_id is None:
             return
@@ -850,6 +1067,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not allowed", str(exc))
 
     def set_status(self, status: str) -> None:
+        if not (
+            self.current_user.has_permission(PERMISSION_UPDATE_OWN_TASK_STATUS)
+            or self.current_user.has_permission(PERMISSION_UPDATE_ALL_TASK_STATUS)
+        ):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to update task status.")
+            return
         task_id = self.selected_task_id()
         if task_id is None:
             return
@@ -888,6 +1111,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def export_json(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_EXPORT_DATA):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to export data.")
+            return
         file_path, _ = QFileDialog.getSaveFileName(self, "Export JSON Bundle", str(Path.home() / "tasks_export.zip"), "Zip Files (*.zip)")
         if not file_path:
             return
@@ -895,6 +1121,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Export complete", f"JSON bundle exported to:\n{result}")
 
     def export_csv(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_EXPORT_DATA):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to export data.")
+            return
         file_path, _ = QFileDialog.getSaveFileName(self, "Export CSV", str(Path.home() / "tasks_export.csv"), "CSV Files (*.csv)")
         if not file_path:
             return
@@ -902,6 +1131,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Export complete", f"CSV exported to:\n{result}")
 
     def import_json(self) -> None:
+        if not self.current_user.has_permission(PERMISSION_IMPORT_DATA):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to import data.")
+            return
         file_path, _ = QFileDialog.getOpenFileName(self, "Import JSON Bundle", "", "Zip Files (*.zip)")
         if not file_path:
             return
@@ -922,8 +1154,11 @@ class MainWindow(QMainWindow):
         self.refresh_tasks()
 
     def open_admin_panel(self) -> None:
-        if not self.current_user.is_admin:
-            QMessageBox.warning(self, "Restricted", "Only admin can access the admin panel.")
+        if not (
+            self.current_user.has_permission(PERMISSION_MANAGE_USERS)
+            or self.current_user.has_permission(PERMISSION_MANAGE_ROLES)
+        ):
+            QMessageBox.warning(self, "Restricted", "You do not have permission to access the admin panel.")
             return
         dialog = AdminPanelDialog(self.user_service, self.task_service, self.current_user)
         dialog.exec()
@@ -946,3 +1181,8 @@ class MainWindow(QMainWindow):
             return
         self.setWindowTitle(f"Task App - {self.current_user.display_name}")
         QMessageBox.information(self, "Account updated", "Your account settings were saved.")
+
+    def request_logout(self) -> None:
+        if QMessageBox.question(self, "Log out", "Do you want to log out of the current session?") != QMessageBox.StandardButton.Yes:
+            return
+        self.logout_requested.emit()

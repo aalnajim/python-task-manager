@@ -15,21 +15,85 @@ PRIORITIES = ["low", "medium", "high", "critical"]
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 
+PERMISSION_MANAGE_USERS = "manage_users"
+PERMISSION_MANAGE_ROLES = "manage_roles"
+PERMISSION_VIEW_ALL_TASKS = "view_all_tasks"
+PERMISSION_CREATE_TASKS = "create_tasks"
+PERMISSION_EDIT_OWN_TASKS = "edit_own_tasks"
+PERMISSION_EDIT_ALL_TASKS = "edit_all_tasks"
+PERMISSION_DELETE_OWN_TASKS = "delete_own_tasks"
+PERMISSION_DELETE_ALL_TASKS = "delete_all_tasks"
+PERMISSION_ASSIGN_TASKS = "assign_tasks"
+PERMISSION_UPDATE_OWN_TASK_STATUS = "update_own_task_status"
+PERMISSION_UPDATE_ALL_TASK_STATUS = "update_all_task_status"
+PERMISSION_EXPORT_DATA = "export_data"
+PERMISSION_IMPORT_DATA = "import_data"
+
+ALL_PERMISSIONS = [
+    PERMISSION_MANAGE_USERS,
+    PERMISSION_MANAGE_ROLES,
+    PERMISSION_VIEW_ALL_TASKS,
+    PERMISSION_CREATE_TASKS,
+    PERMISSION_EDIT_OWN_TASKS,
+    PERMISSION_EDIT_ALL_TASKS,
+    PERMISSION_DELETE_OWN_TASKS,
+    PERMISSION_DELETE_ALL_TASKS,
+    PERMISSION_ASSIGN_TASKS,
+    PERMISSION_UPDATE_OWN_TASK_STATUS,
+    PERMISSION_UPDATE_ALL_TASK_STATUS,
+    PERMISSION_EXPORT_DATA,
+    PERMISSION_IMPORT_DATA,
+]
+
+PERMISSION_LABELS = {
+    PERMISSION_MANAGE_USERS: "Manage users",
+    PERMISSION_MANAGE_ROLES: "Manage roles",
+    PERMISSION_VIEW_ALL_TASKS: "View all tasks",
+    PERMISSION_CREATE_TASKS: "Create tasks",
+    PERMISSION_EDIT_OWN_TASKS: "Edit own tasks",
+    PERMISSION_EDIT_ALL_TASKS: "Edit all tasks",
+    PERMISSION_DELETE_OWN_TASKS: "Delete own tasks",
+    PERMISSION_DELETE_ALL_TASKS: "Delete all tasks",
+    PERMISSION_ASSIGN_TASKS: "Assign tasks",
+    PERMISSION_UPDATE_OWN_TASK_STATUS: "Update own task status",
+    PERMISSION_UPDATE_ALL_TASK_STATUS: "Update all task status",
+    PERMISSION_EXPORT_DATA: "Export data",
+    PERMISSION_IMPORT_DATA: "Import data",
+}
+
+
+@dataclass(slots=True)
+class Role:
+    id: int
+    name: str
+    description: str
+    permissions: tuple[str, ...]
+    is_system: bool
+    created_at: str
+
+    def has_permission(self, permission: str) -> bool:
+        return permission in self.permissions
+
 
 @dataclass(slots=True)
 class User:
     id: int
     username: str
     display_name: str
+    role_id: int
     role: str
     active: bool
     created_at: str
     public_key_pem: str | None = None
+    permissions: frozenset[str] = field(default_factory=frozenset)
     session_private_key: Any | None = field(default=None, repr=False)
 
     @property
     def is_admin(self) -> bool:
-        return self.role == ROLE_ADMIN
+        return self.has_permission(PERMISSION_MANAGE_USERS) and self.has_permission(PERMISSION_MANAGE_ROLES)
+
+    def has_permission(self, permission: str) -> bool:
+        return permission in self.permissions
 
 
 @dataclass(slots=True)
