@@ -130,10 +130,63 @@ This keeps runtime data and project source code separated.
 
 ## Packaging
 
-This project is structured so it can later be packaged into a macOS desktop app with tools such as:
+This project includes a macOS app build flow using `PyInstaller` inside the local `.venv`.
 
-- `PyInstaller`
-- `py2app`
+Install build dependencies into `.venv`:
+
+```bash
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install pyinstaller
+```
+
+Run the test suite:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -p 'test*.py'
+```
+
+Build the `.app` bundle:
+
+```bash
+chmod +x scripts/build_macos_app.sh
+./scripts/build_macos_app.sh
+```
+
+Output:
+
+```text
+dist/Python Task Manager.app
+```
+
+The build script also generates the app icon assets inside:
+
+```text
+assets/icon/
+```
+
+Notes:
+
+- Packaging is intended to be run on macOS
+- Build artifacts are ignored by Git via `.gitignore`
+- The generated `.app` uses the bundle identifier:
+  `com.aalnajim.python-task-manager`
+
+## Version Control Notes
+
+Keep these tracked in Git:
+
+- source code
+- tests
+- `README.md`
+- `requirements.txt`
+- packaging scripts
+
+Do not commit:
+
+- `.venv/`
+- `build/`
+- `dist/`
+- local runtime data from `~/.task_app`
 
 ## License
 

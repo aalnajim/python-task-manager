@@ -11,3 +11,8 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+*.spec
+.DS_Store
+.pip-cache/
+.pytest_cache/
+assets/icon/*.tiff
