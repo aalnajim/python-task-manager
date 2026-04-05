@@ -188,6 +188,14 @@ Do not commit:
 - `dist/`
 - local runtime data from `~/.task_app`
 
+## Releases
+
+Download packaged app builds from the [GitHub Releases](https://github.com/aalnajim/python-task-manager/releases) page.
+
+Current macOS release:
+
+- [Python Task Manager v1.0.0](https://github.com/aalnajim/python-task-manager/releases/tag/v1.0.0)
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE).
