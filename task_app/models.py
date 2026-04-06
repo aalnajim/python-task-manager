@@ -86,6 +86,8 @@ class User:
     created_at: str
     public_key_pem: str | None = None
     permissions: frozenset[str] = field(default_factory=frozenset)
+    must_change_password: bool = False
+    is_bootstrap_admin: bool = False
     session_private_key: Any | None = field(default=None, repr=False)
 
     @property

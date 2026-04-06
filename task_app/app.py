@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from task_app.config import LoginStateStore, get_app_paths
 from task_app.data.database import Database
@@ -10,7 +10,7 @@ from task_app.services.auth import AuthService
 from task_app.services.import_export import ImportExportService
 from task_app.services.tasks import TaskService
 from task_app.services.users import UserService
-from task_app.ui.main_window import LoginDialog, MainWindow
+from task_app.ui.main_window import ForcePasswordChangeDialog, LoginDialog, MainWindow
 from task_app.utils.security import SecurityManager
 
 
@@ -54,7 +54,29 @@ class AppController:
             self.app.quit()
             return
         self.login_state.save(login.remember_me.isChecked(), login.username.text())
-        self.show_main_window(login.user)
+        user = login.user
+        if user.must_change_password:
+            user = self.force_password_change(user)
+            if user is None:
+                self.show_login()
+                return
+        self.show_main_window(user)
+
+    def force_password_change(self, user):
+        while True:
+            dialog = ForcePasswordChangeDialog(user.username)
+            if dialog.exec() != ForcePasswordChangeDialog.DialogCode.Accepted:
+                return None
+            try:
+                return self.user_service.update_profile(
+                    user.id,
+                    user.username,
+                    user.display_name,
+                    dialog.current_password.text(),
+                    dialog.new_password.text(),
+                )
+            except Exception as exc:
+                QMessageBox.warning(None, "Password not changed", str(exc))
 
     def show_main_window(self, user) -> None:
         self.window = MainWindow(user, self.task_service, self.user_service, self.import_export_service)

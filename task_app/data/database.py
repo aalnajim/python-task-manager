@@ -98,6 +98,8 @@ class Database:
                     public_key_pem TEXT,
                     encrypted_private_key TEXT,
                     role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+                    must_change_password INTEGER NOT NULL DEFAULT 0,
+                    is_bootstrap_admin INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -158,6 +160,7 @@ class Database:
             self._seed_default_roles(conn)
             self._seed_default_admin(conn)
             self._migrate_users_to_roles(conn)
+            self._mark_bootstrap_admin(conn)
             self._migrate_existing_rows(conn)
 
     def _ensure_user_columns(self, conn) -> None:
@@ -166,6 +169,10 @@ class Database:
             conn.execute("ALTER TABLE users ADD COLUMN public_key_pem TEXT")
         if "encrypted_private_key" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN encrypted_private_key TEXT")
+        if "must_change_password" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        if "is_bootstrap_admin" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_bootstrap_admin INTEGER NOT NULL DEFAULT 0")
         if "role_id" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN role_id INTEGER REFERENCES roles(id)")
 
@@ -203,8 +210,11 @@ class Database:
         public_key_pem, encrypted_private_key = self.security.generate_user_keypair("admin123")
         conn.execute(
             """
-            INSERT INTO users (username, display_name, password_hash, public_key_pem, encrypted_private_key, role, role_id, active, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            INSERT INTO users (
+                username, display_name, password_hash, public_key_pem, encrypted_private_key,
+                role, role_id, must_change_password, is_bootstrap_admin, active, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)
             """,
             (
                 "admin",
@@ -233,6 +243,11 @@ class Database:
             legacy_role = row["role"] or ROLE_USER
             role_id = self._role_id_by_legacy_name(conn, legacy_role)
             conn.execute("UPDATE users SET role_id = ? WHERE id = ?", (role_id, row["id"]))
+
+    def _mark_bootstrap_admin(self, conn) -> None:
+        row = conn.execute("SELECT id, is_bootstrap_admin FROM users WHERE username = 'admin' ORDER BY id LIMIT 1").fetchone()
+        if row and not row["is_bootstrap_admin"]:
+            conn.execute("UPDATE users SET is_bootstrap_admin = 1 WHERE id = ?", (row["id"],))
 
     def _migrate_existing_rows(self, conn) -> None:
         task_rows = conn.execute("SELECT id, title, description, deadline, more_info, master_task_key FROM tasks").fetchall()

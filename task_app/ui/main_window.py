@@ -285,6 +285,41 @@ class AccountSettingsDialog(QDialog):
         self.accept()
 
 
+class ForcePasswordChangeDialog(QDialog):
+    def __init__(self, username: str):
+        super().__init__()
+        self.setWindowTitle("Change Password")
+        layout = QFormLayout(self)
+        notice = QLabel(f"The password for {username} must be changed before continuing.")
+        notice.setWordWrap(True)
+        self.current_password = QLineEdit()
+        self.current_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password = QLineEdit()
+        self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_password = QLineEdit()
+        self.confirm_password.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow(notice)
+        layout.addRow("Current password", self.current_password)
+        layout.addRow("New password", self.new_password)
+        layout.addRow("Confirm new password", self.confirm_password)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def validate_and_accept(self) -> None:
+        if not self.new_password.text():
+            QMessageBox.warning(self, "Password required", "Enter a new password.")
+            return
+        if self.new_password.text() == self.current_password.text():
+            QMessageBox.warning(self, "Choose a new password", "The new password must be different from the current password.")
+            return
+        if self.new_password.text() != self.confirm_password.text():
+            QMessageBox.warning(self, "Password mismatch", "The new password and confirmation do not match.")
+            return
+        self.accept()
+
+
 class AssignTaskDialog(QDialog):
     def __init__(self, user_service: UserService, task: Task):
         super().__init__()
@@ -525,6 +560,8 @@ class TaskDetailsDialog(QDialog):
 
 
 class AdminPanelDialog(QDialog):
+    current_user_changed = Signal()
+
     def __init__(self, user_service: UserService, task_service: TaskService, current_user: User):
         super().__init__()
         self.user_service = user_service
@@ -678,7 +715,16 @@ class AdminPanelDialog(QDialog):
         if not dialog.exec():
             return
         try:
-            self.user_service.update_user_role(user_id, int(role_input.currentData()))
+            self.user_service.update_user_role(self.current_user.id, user_id, int(role_input.currentData()))
+            if user_id == self.current_user.id:
+                self.current_user = self.user_service.get_user(self.current_user.id)
+                self.current_user_changed.emit()
+                if not (
+                    self.current_user.has_permission(PERMISSION_MANAGE_USERS)
+                    or self.current_user.has_permission(PERMISSION_MANAGE_ROLES)
+                ):
+                    self.accept()
+                    return
             self.refresh()
         except Exception as exc:
             QMessageBox.warning(self, "Could not change role", str(exc))
@@ -692,8 +738,11 @@ class AdminPanelDialog(QDialog):
             return
         user_id = int(self.user_table.item(row, 0).text())
         active = self.user_table.item(row, 4).text() == "inactive"
-        self.user_service.set_user_active(user_id, active)
-        self.refresh()
+        try:
+            self.user_service.set_user_active(self.current_user.id, user_id, active)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not update user", str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -792,6 +841,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        self.main_layout = layout
 
         dashboard = QGroupBox("Dashboard")
         dashboard_layout = QGridLayout(dashboard)
@@ -837,55 +887,13 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         layout.addWidget(self.table)
 
-        action_row = QHBoxLayout()
-        create_button = QPushButton("New Task")
-        details_button = QPushButton("View Details")
-        assign_button = QPushButton("Assign/Reassign")
-        edit_button = QPushButton("Edit Task")
-        delete_button = QPushButton("Delete Task")
-        status_button = QPushButton("Mark In Progress")
-        done_button = QPushButton("Mark Completed")
-        history_button = QPushButton("View History")
-        export_json_button = QPushButton("Export JSON")
-        export_csv_button = QPushButton("Export CSV")
-        import_button = QPushButton("Import JSON")
-        if self.current_user.has_permission(PERMISSION_CREATE_TASKS):
-            action_row.addWidget(create_button)
-        action_row.addWidget(details_button)
-        if self.current_user.has_permission(PERMISSION_ASSIGN_TASKS):
-            action_row.addWidget(assign_button)
-        if self.current_user.has_permission(PERMISSION_EDIT_OWN_TASKS) or self.current_user.has_permission(PERMISSION_EDIT_ALL_TASKS):
-            action_row.addWidget(edit_button)
-        if self.current_user.has_permission(PERMISSION_DELETE_OWN_TASKS) or self.current_user.has_permission(PERMISSION_DELETE_ALL_TASKS):
-            action_row.addWidget(delete_button)
-        if self.current_user.has_permission(PERMISSION_UPDATE_OWN_TASK_STATUS) or self.current_user.has_permission(PERMISSION_UPDATE_ALL_TASK_STATUS):
-            action_row.addWidget(status_button)
-            action_row.addWidget(done_button)
-        action_row.addWidget(history_button)
-        if self.current_user.has_permission(PERMISSION_EXPORT_DATA):
-            action_row.addWidget(export_json_button)
-            action_row.addWidget(export_csv_button)
-        if self.current_user.has_permission(PERMISSION_IMPORT_DATA):
-            action_row.addWidget(import_button)
-        layout.addLayout(action_row)
-
-        create_button.clicked.connect(self.create_task)
-        details_button.clicked.connect(self.view_task_details)
-        assign_button.clicked.connect(self.assign_task)
-        edit_button.clicked.connect(self.edit_task)
-        delete_button.clicked.connect(self.delete_task)
-        status_button.clicked.connect(lambda: self.set_status("under_progress"))
-        done_button.clicked.connect(lambda: self.set_status("completed"))
-        history_button.clicked.connect(self.show_history)
-        export_json_button.clicked.connect(self.export_json)
-        export_csv_button.clicked.connect(self.export_csv)
-        import_button.clicked.connect(self.import_json)
-
+        self._build_action_row()
         self._build_menus()
         self.refresh_tasks()
 
     def _build_menus(self) -> None:
         menu = self.menuBar()
+        menu.clear()
         file_menu = menu.addMenu("File")
         export_json = QAction("Export JSON Bundle", self)
         export_json.triggered.connect(self.export_json)
@@ -911,6 +919,50 @@ class MainWindow(QMainWindow):
             admin_panel = QAction("Open Admin Panel", self)
             admin_panel.triggered.connect(self.open_admin_panel)
             admin_menu.addAction(admin_panel)
+
+    def _build_action_row(self) -> None:
+        if hasattr(self, "action_row_widget"):
+            self.main_layout.removeWidget(self.action_row_widget)
+            self.action_row_widget.deleteLater()
+        self.action_row_widget = QWidget()
+        action_row = QHBoxLayout(self.action_row_widget)
+        action_row.setContentsMargins(0, 0, 0, 0)
+
+        def add_button(label: str, handler, visible: bool = True) -> None:
+            if not visible:
+                return
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            action_row.addWidget(button)
+
+        add_button("New Task", self.create_task, self.current_user.has_permission(PERMISSION_CREATE_TASKS))
+        add_button("View Details", self.view_task_details, True)
+        add_button("Assign/Reassign", self.assign_task, self.current_user.has_permission(PERMISSION_ASSIGN_TASKS))
+        add_button(
+            "Edit Task",
+            self.edit_task,
+            self.current_user.has_permission(PERMISSION_EDIT_OWN_TASKS) or self.current_user.has_permission(PERMISSION_EDIT_ALL_TASKS),
+        )
+        add_button(
+            "Delete Task",
+            self.delete_task,
+            self.current_user.has_permission(PERMISSION_DELETE_OWN_TASKS) or self.current_user.has_permission(PERMISSION_DELETE_ALL_TASKS),
+        )
+        can_update_status = self.current_user.has_permission(PERMISSION_UPDATE_OWN_TASK_STATUS) or self.current_user.has_permission(PERMISSION_UPDATE_ALL_TASK_STATUS)
+        add_button("Mark In Progress", lambda: self.set_status("under_progress"), can_update_status)
+        add_button("Mark Completed", lambda: self.set_status("completed"), can_update_status)
+        add_button("View History", self.show_history, True)
+        add_button("Export JSON", self.export_json, self.current_user.has_permission(PERMISSION_EXPORT_DATA))
+        add_button("Export CSV", self.export_csv, self.current_user.has_permission(PERMISSION_EXPORT_DATA))
+        add_button("Import JSON", self.import_json, self.current_user.has_permission(PERMISSION_IMPORT_DATA))
+        self.main_layout.addWidget(self.action_row_widget)
+
+    def sync_current_user(self) -> None:
+        self.current_user = self.user_service.get_user(self.current_user.id)
+        self.setWindowTitle(f"Task App - {self.current_user.display_name}")
+        self._build_action_row()
+        self._build_menus()
+        self.refresh_tasks()
 
     def selected_task_id(self) -> int | None:
         row = self.table.currentRow()
@@ -1161,8 +1213,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Restricted", "You do not have permission to access the admin panel.")
             return
         dialog = AdminPanelDialog(self.user_service, self.task_service, self.current_user)
+        dialog.current_user_changed.connect(self.sync_current_user)
         dialog.exec()
-        self.refresh_tasks()
+        self.sync_current_user()
 
     def open_account_settings(self) -> None:
         dialog = AccountSettingsDialog(self.current_user)

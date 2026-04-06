@@ -6,7 +6,7 @@ Local-first desktop task manager built with Python, PySide6, and SQLite, designe
 
 - Desktop UI built with `PySide6`
 - Local multi-user task management
-- Admin and user roles
+- Role-based permissions with admin-managed roles
 - Task assignment and reassignment
 - Task priorities, deadlines, notes, and attachments
 - Status tracking: `new`, `under_progress`, `completed`
@@ -28,16 +28,24 @@ Local-first desktop task manager built with Python, PySide6, and SQLite, designe
 
 ### Roles and Permissions
 
-- `admin` users can:
-  - create users
-  - activate and deactivate users
-  - assign and reassign tasks
-  - edit and delete any task
-- regular users can:
-  - create tasks
-  - edit their own tasks
-  - change status on tasks they participate in
-- owners can delete their own tasks only while those tasks are still unassigned
+- Admins can create custom roles with fixed permissions
+- Users are assigned to one existing role
+- A user is considered admin-capable when their role includes both `manage_users` and `manage_roles`
+- Permissions can control access to:
+  - user management
+  - role management
+  - viewing all tasks
+  - creating tasks
+  - editing own tasks
+  - editing all tasks
+  - deleting own tasks
+  - deleting all tasks
+  - assigning tasks
+  - updating own task status
+  - updating all task status
+  - export/import tools
+- The main UI hides actions the current user is not allowed to use
+- If a user changes their own role and loses access, the UI refreshes immediately without requiring logout
 
 ### Import and Export
 
@@ -51,10 +59,16 @@ Local-first desktop task manager built with Python, PySide6, and SQLite, designe
 - Passwords are stored using salted `PBKDF2-SHA256`
 - Task content is encrypted at rest
 - Task decryption follows per-user access rules
+- The bootstrap admin account is forced to change its password before entering the app
+- The login dialog supports `Remember me` for the username only
+- The app includes an in-session `Log Out` action
+- The built-in `Administrator` role is protected from accidental edits
+- The original bootstrap admin account cannot be demoted or deactivated by anyone, including itself
+- The app prevents changes that would leave zero active admin-capable users
 - Task access is intended for:
   - the creator
   - the assignee
-  - active admins
+  - users with task-visibility permissions when access is granted
 
 ## Project Structure
 
@@ -96,16 +110,34 @@ python3 -m venv .venv
 .venv/bin/python -m task_app
 ```
 
+## Login Flow
+
+The login screen now:
+
+- starts with empty credentials by default
+- supports a `Remember me` checkbox that stores only the username in `~/.task_app/login_state.json`
+- forces the bootstrap admin to change password on first successful login
+- supports logging out from inside the app via `Account -> Log Out`
+
 ## Default Local Admin
 
-Initial local development credentials:
+The initial local bootstrap admin account is:
 
 - Username: `admin`
 - Password: `admin123`
 
-Change the password after first login from:
+On first successful login, this account must change its password before the main window opens.
+
+After that, password updates are available from:
 
 `Account -> Profile & Password`
+
+## Admin Safeguards
+
+- The built-in `Administrator` role is protected and cannot be edited into a broken state
+- The original bootstrap admin user is protected and cannot have its role changed or be deactivated
+- Other admin-capable users can manage and demote one another, and can demote themselves, as long as at least one active admin-capable user remains
+- If the current user changes their own role, menus and action buttons refresh immediately to match the new permissions
 
 ## Local App Data
 

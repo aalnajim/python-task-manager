@@ -19,6 +19,8 @@ class AuthService:
                     u.role_id,
                     r.name AS role_name,
                     u.active,
+                    u.must_change_password,
+                    u.is_bootstrap_admin,
                     u.created_at,
                     u.password_hash,
                     u.public_key_pem,
@@ -62,5 +64,7 @@ class AuthService:
             created_at=row["created_at"],
             public_key_pem=public_key_pem,
             permissions=frozenset(filter(None, (row["permissions"] or "").split(","))),
+            must_change_password=bool(row["must_change_password"]),
+            is_bootstrap_admin=bool(row["is_bootstrap_admin"]),
             session_private_key=private_key,
         )

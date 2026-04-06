@@ -78,6 +78,17 @@ class TaskAppServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.task_service.get_task(self.alice, task_id)
 
+    def test_default_admin_must_change_password_on_first_login(self) -> None:
+        assert self.admin is not None
+        self.assertTrue(self.admin.must_change_password)
+        self.assertTrue(self.admin.is_bootstrap_admin)
+
+    def test_built_in_administrator_role_cannot_be_edited(self) -> None:
+        roles = {role.name: role for role in self.users.list_roles()}
+        admin_role = roles["Administrator"]
+        with self.assertRaises(ValueError):
+            self.users.update_role(admin_role.id, "Administrator", "Changed", [PERMISSION_MANAGE_USERS])
+
     def test_owner_cannot_delete_assigned_task(self) -> None:
         task_id = self.task_service.create_task(
             self.admin,
@@ -180,6 +191,14 @@ class TaskAppServiceTests(unittest.TestCase):
         self.assertEqual(updated.display_name, "Alice Smith")
         self.assertIsNotNone(self.auth.login("alice2", "newpass"))
 
+    def test_password_change_clears_must_change_flag(self) -> None:
+        updated = self.users.update_profile(self.admin.id, "admin", "Administrator", "admin123", "securepass123")
+        self.assertFalse(updated.must_change_password)
+        admin = self.auth.login("admin", "securepass123")
+        self.assertIsNotNone(admin)
+        assert admin is not None
+        self.assertFalse(admin.must_change_password)
+
     def test_custom_role_is_persisted_with_permissions(self) -> None:
         role = self.users.create_role(
             "Ops Lead",
@@ -192,6 +211,47 @@ class TaskAppServiceTests(unittest.TestCase):
         assert ops is not None
         self.assertEqual(ops.role, "Ops Lead")
         self.assertTrue(ops.has_permission(PERMISSION_MANAGE_USERS))
+
+    def test_cannot_change_own_admin_capable_role(self) -> None:
+        other_admin_role = self.users.create_role(
+            "Ops Admin",
+            "Extra admin role.",
+            [PERMISSION_MANAGE_USERS, PERMISSION_MANAGE_ROLES],
+        )
+        self.users.create_user("opsadmin2", "Ops Admin 2", "pw6", other_admin_role.id)
+        opsadmin2 = self.auth.login("opsadmin2", "pw6")
+        assert opsadmin2 is not None
+        self.users.update_user_role(opsadmin2.id, opsadmin2.id, self.staff_role.id)
+        updated = self.users.get_user(opsadmin2.id)
+        self.assertEqual(updated.role, "Staff")
+
+    def test_cannot_deactivate_last_admin_capable_user(self) -> None:
+        with self.assertRaises(ValueError):
+            self.users.set_user_active(self.admin.id, self.admin.id, False)
+
+    def test_cannot_demote_bootstrap_admin_even_with_other_admins(self) -> None:
+        other_admin_role = self.users.create_role(
+            "Ops Admin",
+            "Extra admin role.",
+            [PERMISSION_MANAGE_USERS, PERMISSION_MANAGE_ROLES],
+        )
+        self.users.create_user("opsadmin", "Ops Admin", "pw5", other_admin_role.id)
+        opsadmin = self.auth.login("opsadmin", "pw5")
+        assert opsadmin is not None
+        with self.assertRaises(ValueError):
+            self.users.update_user_role(opsadmin.id, self.admin.id, self.staff_role.id)
+
+    def test_cannot_deactivate_bootstrap_admin_even_with_other_admins(self) -> None:
+        other_admin_role = self.users.create_role(
+            "Ops Admin",
+            "Extra admin role.",
+            [PERMISSION_MANAGE_USERS, PERMISSION_MANAGE_ROLES],
+        )
+        self.users.create_user("opsadmin", "Ops Admin", "pw5", other_admin_role.id)
+        opsadmin = self.auth.login("opsadmin", "pw5")
+        assert opsadmin is not None
+        with self.assertRaises(ValueError):
+            self.users.set_user_active(opsadmin.id, self.admin.id, False)
 
     def test_passwords_are_stored_with_pbkdf2(self) -> None:
         with self.db.connect() as conn:
